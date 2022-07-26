@@ -1,2 +1,2 @@
 # CIMERG
-This demonstration code is for ROK-US training #3 
+This demonstration scripts is for ROK-US training #3 
