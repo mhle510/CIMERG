@@ -1,5 +1,5 @@
 # CIMERG
-This demonstration scripts is for ROK-US training #3 
+This demonstration script is for ROK-US training #3 
 
 The tutorial1_data can be downloaded at https://drive.google.com/file/d/16n_HihOVQCF8TkVj1CztxrXv8cAo2BsR/view?usp=sharing
 
