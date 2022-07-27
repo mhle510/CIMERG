@@ -1,0 +1,476 @@
+---
+title: "Tutorial: How to correct IMERG Late with CDF matching and APHRODITE as reference datasets"
+author: "Manh-Hung Le (SAIC/ NASA GSFC); Email: manh-hung.le@nasa.gov"
+date: "July 26th, 2022"
+output:
+  html_document:
+    code_folding: hide
+---
+# 1 Introduction
+Satellite-based precipitation estimates (NRT-SPE) are needed in areas where rain gauges are collected with a significant delay (a few days or months). However, NRT-SPE often contains both random and systematic errors. To reduce systematic error in NRT-SPE, this tutorial uses the Cumulative Distribution Function (CDF). This demonstration uses APHRODITE as a reference dataset and GPM IMERG Late V6 as a target. 
+
+## 1.1 Objectives
+The following can be learned from this tutorial:
+  * Prepare training and validation datasets for CDF-based adjustment models
+  * Develop CDF transfer function to correct satellite dataset (IMERG Late) based on reference dataset (APHRODITE)
+  * Use the validation set to validate the CDF transfer function.
+
+## 1.2 Data description
+The table below describe key variables in this demonstration
+```{r, warning=FALSE,message=FALSE}
+#install.packages("stargazer")
+knitr::opts_chunk$set(echo = TRUE)
+library(stargazer)
+require("knitr")
+data_description <- data.frame(
+  varname = c("aph","rawim","baim"),
+  description = c("APHRODITE","raw IMERG Late","bias adjustment IMERG Late"),
+  units = c("mm/d","mm/d","mm/d")
+)
+
+kable(data_description, caption = "Data description")
+
+```
+## 1.3 Folder structures
+Data needed for this tutorial is stored in tutorial1_data
+  * /tutorial1_data
+    + /aphro: 0.25 deg daily APHRODITE from 2001-2015 for the study domain
+    + /rawim: 0.10 deg daily IMERG Late from 2001-2015 for the study domain
+    + /shp: mekongRiverbasin.shp: shapefile of Mekong River basin; study_domain.shp: shapefile of study domain in this tutorial. It is a box 104E-107E,12.5N-15.5N
+ * /rscripts
+    + tutorial1_develop_cdf_matching_method.html
+    + tutorial1_develop_cdf_matching_method.Rmd
+    + cdf_support_functions.r: support functions for the tutorial1_develop_cdf_matching_method.Rmd
+    
+# 2 Procedure for bias adjustment
+## Path setup
+This script sets path to the demonstrated files. Please put tutorial1_data and rscripts under the same folder
+```{r, warning=FALSE,message=FALSE}
+# set main dir
+dir.path = '/media/hung/DATA/rokus_demo' # <path to folder>
+setwd(dir.path)
+source(file.path(dir.path, 'rscripts/cdf_support_functions.R'))
+# unzip data and create path
+#temp = tempfile(fileext = ".zip")
+#download.file("https://drive.google.com/file/d/16n_HihOVQCF8TkVj1CztxrXv8cAo2BsR/view?usp=sharing",
+#  temp)
+#unzip(temp, exdir = dir.path, overwrite = T)
+data.path = file.path(dir.path,'tutorial1_data')
+
+#  create path
+dir.create(file.path(dir.path,'processed'), showWarnings = F)
+processed.path = file.path(dir.path,'processed')
+```
+
+## Re-sample IMERG Late
+The script resampled the IMERG Late data to match the APHRODITE data (0.1°C to 0.25°C). The flood season (May through October) is the only time we extract daily data. As a final step, we create a raster stack so that each year has multiple raster layers.
+```{r, warning=FALSE,message=FALSE}
+library(raster)
+library(parallel)
+
+# path to aphrodite
+aph.tif.path = file.path(data.path, 'aphro')
+aph.tif.files = list.files(aph.tif.path, pattern = '*.tif$', recursive = T, full.names = F)
+
+# path to imerg late
+rawim.tif.path = file.path(data.path, 'rawim')
+rawim.tif.files = list.files(rawim.tif.path, pattern = '*.tif$', recursive = T, full.names = F)
+
+# ONLY TAKE DATA IN WET SEASON - MAY - OCTOBER #
+sel.mon =c('05','06','07','08','09','10')
+
+sel.id = which(substr(aph.tif.files,9,10) %in% sel.mon)
+aph.tif.files.sel = aph.tif.files[sel.id]
+sel.id = which(substr(rawim.tif.files,14,15) %in% sel.mon)
+rawim.tif.files.sel = rawim.tif.files[sel.id]
+
+# read selected raster files
+list.aph.tif = lapply(file.path(aph.tif.path, aph.tif.files.sel), raster)
+list.rawim.tif = lapply(file.path(rawim.tif.path, rawim.tif.files.sel), raster)
+
+nr = length(list.aph.tif)
+aph.tif.sample = list.aph.tif[[1]]
+
+cl = makeCluster(detectCores() - 4)
+clusterExport(cl, c('create_raster_from_raster','aph.tif.sample'))
+
+cat('code is runing...','\n')
+list.rawim.tif.res = parLapply(cl, list.rawim.tif,
+                            function(x) 
+                              create_raster_from_raster(oriRas = x, sampleR = aph.tif.sample))
+
+# assign names for each new raw imerg after resample
+names(list.rawim.tif.res) = unlist(lapply(list.rawim.tif, names))
+names(list.aph.tif) = unlist(lapply(list.aph.tif, names))
+
+
+# Create raster stack for each year
+cat('create raster stack for each year...','\n')
+uniq.yr = unique(substr(names(list.aph.tif),5,8))
+for(ii in 1:length(uniq.yr)){
+  cat('-----------', uniq.yr[ii],'\n')
+  # for APHRODITE
+  id.yr =  which(substr(names(list.aph.tif),5,8) %in% uniq.yr[ii])
+  sub.list.aph.tif = list.aph.tif[id.yr]
+  stack.aph= stack(sub.list.aph.tif)
+  stack.aph.df = as.data.frame(stack.aph, xy = T)
+  # for raw IMERG Late
+  id.yr =  which(substr(names(list.rawim.tif.res),10,13) %in% uniq.yr[ii])
+  sub.list.rawim.tif = list.rawim.tif.res[id.yr]
+  stack.rawim= stack(sub.list.rawim.tif)
+  stack.rawim.df = as.data.frame(stack.rawim, xy = T)
+  
+  op.file = paste0(processed.path,'/','yr_',uniq.yr[ii],'_','aph_rawim.rData')
+  save(stack.aph, stack.aph.df ,stack.rawim, stack.rawim.df, file = op.file )
+}
+
+```
+## Create calibration and validation dataset. 
+In this demonstration, we use 2001-2006 as calibration period and 2007-2009 as the validation period
+```{r message=FALSE, warning=FALSE}
+# load and merge datasets for calibration period
+cat('============ create calibration dataset=========','\n')
+cal.yr = seq(2001, 2006, 1)
+# first year
+ii = 1
+ #cat('---', cal.yr[ii],'\n')
+load(paste0(processed.path,'/','yr_',cal.yr[ii],'_','aph_rawim.rData'))
+stack.aph.cal = stack.aph
+stack.aph.cal.df = stack.aph.df
+stack.rawim.cal = stack.rawim
+stack.rawim.cal.df = stack.rawim.df
+
+
+for(ii in 2: length(cal.yr)){
+  #cat('---', cal.yr[ii],'\n')
+  load(paste0(processed.path,'/','yr_',cal.yr[ii],'_','aph_rawim.rData'))
+  stack.aph.cal = stack(stack.aph.cal, stack.aph)
+  stack.aph.cal.df = cbind.data.frame(stack.aph.cal.df, stack.aph.df[,-c(1,2)])
+  
+  stack.rawim.cal = stack(stack.rawim.cal, stack.rawim)
+  stack.rawim.cal.df = cbind.data.frame(stack.rawim.cal.df, stack.rawim.df[,-c(1,2)])
+}
+
+# save as rData
+save(stack.aph.cal, stack.aph.cal.df, stack.rawim.cal, stack.rawim.cal.df,
+     file = paste0(processed.path,'/','yr_cal_01_06_aph_rawim.rData') )
+
+# load and merge datasets for validation period
+val.yr = seq(2007, 2009, 1)
+cat('============ create validation dataset=========','\n')
+# first year
+ii = 1
+cat('---', val.yr[ii],'\n')
+load(paste0(processed.path,'/','yr_',val.yr[ii],'_','aph_rawim.rData'))
+stack.aph.val = stack.aph
+stack.aph.val.df = stack.aph.df
+
+stack.rawim.val = stack.rawim
+stack.rawim.val.df = stack.rawim.df
+for(ii in 2: length(val.yr)){
+  cat('---', val.yr[ii],'\n')
+  load(paste0(processed.path,'/','yr_',val.yr[ii],'_','aph_rawim.rData'))
+  stack.aph.val = stack(stack.aph.val, stack.aph)
+  stack.aph.val.df = cbind.data.frame(stack.aph.val.df, stack.aph.df[,-c(1,2)])
+  
+  stack.rawim.val = stack(stack.rawim.val, stack.rawim)
+  stack.rawim.val.df = cbind.data.frame(stack.rawim.val.df, stack.rawim.df[,-c(1,2)])
+}
+# save as rData
+save(stack.aph.val, stack.aph.val.df, stack.rawim.val, stack.rawim.val.df,
+     file = paste0(processed.path,'/','yr_val_07_09_aph_rawim.rData'))
+
+```
+
+## Train CDF transfer function
+This script develop CDF matching model for each grid.
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(qmap)
+
+# stack raster for bias correction tif
+# evaluation metrics
+# list of cdf for each grid
+
+####################### CALIBRATION PERIOD
+# load calibration dataset
+load(paste0(processed.path,'/','yr_cal_01_06_aph_rawim.rData') )
+
+#### create CDF matching model for each grid
+ng = nrow(stack.aph.cal.df)
+# inital setup
+listCDF = list()
+stack.baim.cal.df = stack.rawim.cal.df
+eval.metrics.ba = data.frame(x = stack.aph.cal.df$x,
+                             y = stack.aph.cal.df$y,
+                             cc = numeric(ng), # correlation coefficient
+                             rb = numeric(ng), # relative bias -
+                             rmse = numeric(ng) # root mean square error - mm/d
+)
+cat('---','grid name','---','latitude of grid centrod',',','longitude of grid centrod','\n')
+for(ii in 1 : ng){
+  date = colnames(stack.aph.cal.df)[-c(1,2)] %>% substr(8,15)
+  sat.dat = unlist(stack.rawim.cal.df[ii,-c(1,2)])
+  obs.dat = unlist(stack.aph.cal.df[ii, -c(1,2)])
+  
+  # remove na
+  dt = data.frame(date, obs.dat, sat.dat)
+  dt.na = na.omit(dt)
+  rownames(dt.na) = NULL
+  
+  # print results
+  cat('---',ii,'---',eval.metrics.ba[ii,1],',',eval.metrics.ba[ii,2],'\n')
+  
+  if(dim(dt.na)[1] == 0){
+    eval.metrics.ba[ii,-c(1,2)] = NA
+    cat('---- no calculation','\n')
+    qm.fit = NA
+    listCDF[[ii]] = qm.fit
+  } else {
+    # CFD model built-up
+    # only select value greater than 1
+    thre.num = 0.1
+    id = which(dt.na[,2] >= thre.num & dt.na[,3] >= thre.num)
+    dt.na.thr1 = dt.na[id,]
+    rownames(dt.na.thr1) = NULL
+    
+    # train the model
+    qm.fit = fitQmapQUANT(obs = dt.na.thr1[,2], mod = dt.na.thr1[,3], wet.day = T, nboot = 1, type = 'linear')
+    # assign correction for original time series
+    dt.na$ba.sat = doQmapQUANT(dt.na$sat.dat, qm.fit, type = 'linear')
+    
+    ## evaluate bias correction time series
+    obs.dat = dt.na$obs.dat; sat.dat = dt.na$ba.sat  
+    # statistical error
+    eval.metrics.ba$cc[ii] = calc_sat_stastics_metrics_single(obs.dat, sat.dat)[1]
+    eval.metrics.ba$rb[ii] = calc_sat_stastics_metrics_single(obs.dat, sat.dat)[2]
+    eval.metrics.ba$rmse[ii] = calc_sat_stastics_metrics_single(obs.dat, sat.dat)[3]
+    
+    # assigned bias correction value to data frame 
+    dt.final = full_join(dt, dt.na, by = 'date')
+    stack.baim.cal.df[ii,-c(1,2)] = dt.final$ba.sat 
+    listCDF[[ii]] = qm.fit
+  }
+}
+
+```
+save CDF transfer function for validation data
+```{r message=FALSE, warning=FALSE}
+# save evaluated matrix
+eval.metrics.baim.cal.df = eval.metrics.ba
+# save QM functions
+save(stack.baim.cal.df, eval.metrics.baim.cal.df, listCDF, file = file.path(processed.path,'list.cdf.train.rData'))
+```
+
+## Apply CDF transfer function to the validation dataset
+After we obtain CDF transfer function for each grid for calibration period. We apply CDF function to new dataset
+```{r message=FALSE, warning=FALSE}
+library(qmap)
+
+####################### VALIDATION PERIOD
+load(paste0(processed.path,'/','yr_val_07_09_aph_rawim.rData') )
+load(paste0(processed.path,'/','list.cdf.train.rData') )
+
+# only select cdf which have values
+id.na = which(is.na(eval.metrics.baim.cal.df$cc))
+if(length(id.na) >0){
+  eval.metrics.baim.cal.df.adj = eval.metrics.baim.cal.df[-id.na,]
+  row.names(eval.metrics.baim.cal.df.adj) = NULL
+  listCDF.adj = listCDF[-id.na]
+} else {
+  eval.metrics.baim.cal.df.adj = eval.metrics.baim.cal.df
+  listCDF.adj = listCDF
+}
+
+
+#### create CDF matching model for each grid
+ng = nrow(stack.rawim.val.df)
+
+stack.baim.val.df = stack.rawim.val.df
+eval.metrics.ba = data.frame(x = stack.rawim.val.df$x,
+                             y = stack.rawim.val.df$y,
+                             cc = numeric(ng), # correlation coefficient
+                             rb = numeric(ng), # relative bias -
+                             rmse = numeric(ng) # root mean square error - mm/d
+     
+)
+cat('---','grid name','---','latitude of grid centrod',',','longitude of grid centrod','\n')
+for(ii in 1 : ng){
+  date = colnames(stack.aph.val.df)[-c(1,2)] %>% substr(8,15)
+  sat.dat = unlist(stack.rawim.val.df[ii,-c(1,2)])
+  obs.dat = unlist(stack.aph.val.df[ii, -c(1,2)])
+  
+  # remove na
+  dt = data.frame(date, obs.dat, sat.dat)
+  dt.na = na.omit(dt)
+  rownames(dt.na) = NULL
+  
+  
+  # print results
+  cat('---',ii,'---',eval.metrics.ba[ii,1],',',eval.metrics.ba[ii,2],'\n')
+  
+  if(dim(dt.na)[1] == 0){
+    eval.metrics.ba[ii,-c(1,2)] = NA
+    cat('---- no calculation','\n')
+  } else {
+    # coordinates extraction
+    xy.target = stack.rawim.val.df[ii,c(1,2)]
+    dis.matrix = rep(0, nrow(eval.metrics.baim.cal.df.adj))
+    for(kk in 1 : length(dis.matrix)){
+      dis.matrix[kk] = c(gcd(xy.target[1], xy.target[2], eval.metrics.baim.cal.df.adj$x[kk], eval.metrics.baim.cal.df.adj$y[kk]))
+    }
+    dis.matrix = unlist(dis.matrix)
+    # finding the closest CDF
+    id.close = which(dis.matrix == min(dis.matrix))
+    cat('--- id', id.close)
+    # assign correction for original time series
+    qm.fit = listCDF.adj[[id.close]]
+    dt.na$ba.sat = doQmapQUANT(dt.na$sat.dat, qm.fit, type = 'linear')
+    
+    ## evaluate bias correction time series
+    obs.dat = dt.na$obs.dat; sat.dat = dt.na$ba.sat  
+    # statistical error
+    eval.metrics.ba$cc[ii] = calc_sat_stastics_metrics_single(obs.dat, sat.dat)[1]
+    eval.metrics.ba$rb[ii] = calc_sat_stastics_metrics_single(obs.dat, sat.dat)[2]
+    eval.metrics.ba$rmse[ii] = calc_sat_stastics_metrics_single(obs.dat, sat.dat)[3]
+    
+    cat('---- calculation','\n')
+    # assigned bias correction value to data frame 
+    dt.final = full_join(dt, dt.na, by = 'date')
+    stack.baim.val.df[ii,-c(1,2)] = dt.final$ba.sat 
+  }
+  
+# save evaluated matrix for the calibration period
+eval.metrics.baim.val.df = eval.metrics.ba
+# save as rData
+save(stack.baim.val.df, eval.metrics.baim.val.df , file = file.path(processed.path,'metrics.val.rData'))
+}
+```
+
+## Evaluation of the IMERG Late dataset before and after the bias adjustment procedure. 
+The evaluation is carried on pixel based. First, we compare average daily between APHRODITE, raw IMERG Late, and bias adjustment IMERG Late
+```{r message=FALSE, warning=FALSE}
+#install.packages('fields')
+#install.packages('pals')
+library(fields)
+library(colorRamps)
+library(pals)
+# load bias adjustment IMERG data for the calibration period
+load(file.path(processed.path,'metrics.val.rData'))
+# load raw IMERG data for the calibration period
+load(file.path(processed.path,'yr_val_07_09_aph_rawim.rData'))
+
+# create average precipitation raster for APHRODITE
+avg.aph.val.df = data.frame(x = stack.aph.val.df$x,
+                            y = stack.aph.val.df$y,
+                            avg = rowMeans(stack.aph.val.df[, -c(1,2)]))
+avg.aph.val.ras = create_raster_from_datXY(datXY = avg.aph.val.df, fieldName = 'avg', sampleR = raster(stack.aph.val, layer = 1))
+
+# create average precipitation raster for raw IMERG Late
+avg.rawim.val.df = data.frame(x = stack.rawim.val.df$x,
+                             y = stack.rawim.val.df$y,
+                             avg = rowMeans(stack.rawim.val.df[, -c(1,2)]))
+
+avg.rawim.val.ras = create_raster_from_datXY(datXY = avg.rawim.val.df, fieldName = 'avg', sampleR = raster(stack.aph.val, layer = 1))
+
+# create average precipitation raster for bias adjustment IMERG Late
+avg.baim.val.df = data.frame(x = stack.baim.val.df$x,
+                             y = stack.baim.val.df$y,
+                             avg = rowMeans(stack.baim.val.df[, -c(1,2)]))
+
+avg.baim.val.ras = create_raster_from_datXY(datXY = avg.baim.val.df, fieldName = 'avg', sampleR = raster(stack.aph.val, layer = 1))
+
+# reclassifiy raster
+rec.prep = cbind(seq(-0.5,10.5,1),
+                 c(seq(0.5,10.5,1),40), 1:12)
+col.precip = rev(ocean.haline(12))
+avg.aph.val.ras.rec = reclassify(avg.aph.val.ras, rec.prep)
+avg.rawim.val.ras.rec = reclassify(avg.rawim.val.ras, rec.prep)
+avg.baim.val.ras.rec = reclassify(avg.baim.val.ras, rec.prep)
+
+
+par(mfrow = c(1,3), oma = c(1,1,1,4), tck  =-0.01, cex = 0.8)
+# panel 1 - APHRODITE-cal 2001-2009
+{plot(0,0, col = 'white', xlim = c(104,107), ylim = c(12.5,15.5), xlab = '', ylab = '', axes  =F)
+# correct color code
+t = rasterToPoints(avg.aph.val.ras.rec )
+t.uni = unique(t[,3])
+col.precip.adj = col.precip[t.uni[order(t.uni)]]
+image(avg.aph.val.ras.rec , col = col.precip.adj, add = T)
+mtext('(a)-APHRODITE', cex = 0.7, font = 2, col = 'darkred', adj = 0)
+}
+
+{plot(0,0, col = 'white', xlim = c(104,107), ylim = c(12.5,15.5), xlab = '', ylab = '', axes  =F)
+# correct color code
+t = rasterToPoints(avg.rawim.val.ras.rec )
+t.uni = unique(t[,3])
+col.precip.adj = col.precip[t.uni[order(t.uni)]]
+image(avg.rawim.val.ras.rec , col = col.precip.adj, add = T)
+mtext('(b)-raw IMERGL', cex = 0.7, font = 2, col = 'darkred', adj = 0)
+}
+
+{plot(0,0, col = 'white', xlim = c(104,107), ylim = c(12.5,15.5), xlab = '', ylab = '', axes  =F)
+# correct color code
+t = rasterToPoints(avg.baim.val.ras.rec )
+t.uni = unique(t[,3])
+col.precip.adj = col.precip[t.uni[order(t.uni)]]
+image(avg.baim.val.ras.rec , col = col.precip.adj, add = T)
+mtext('(c)-ba IMERGL', cex = 0.7, font = 2, col = 'darkred', adj = 0)
+
+image.plot(legend.only = T, zlim  =c(1,12), col = col.precip, horizontal = F,
+           legend.width = 0.35, legend.line = -1.5, legend.cex = 0.7,
+           legend.lab = "P (mm/d)",
+           smallplot = c(0.9,0.95, 0.2, 0.9),
+           axis.args = list(at = seq(1,12,1),
+                            labels = c(seq(0,10,1), '>10'),
+                            cex.axis = 0.7, mgp = c(0, 0.25,0), tck = -0.1)
+           )
+}
+
+```
+
+Secondly, we compare average precipitation using scatter plots
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+
+# extract raster to points 
+# Aphrodite
+aph.val.df = rasterToPoints(avg.aph.val.ras) %>% data.frame()
+# raw IMERG
+rawim.val.df = rasterToPoints(avg.rawim.val.ras) %>% data.frame()
+# bias adjustment IMERG
+baim.val.df = rasterToPoints(avg.baim.val.ras) %>% data.frame()
+
+# merge reference and raw IMERG 
+val.rawim.df = left_join(aph.val.df, rawim.val.df, by = c('x','y'))
+colnames(val.rawim.df) = c('x','y','obs','sat')
+
+# merge reference and bias adjustment IMERG 
+val.baim.df = left_join(aph.val.df, baim.val.df, by = c('x','y'))
+colnames(val.baim.df) = c('x','y','obs','sat')
+
+yrange = range(c(aph.val.df[,-c(1,2)], rawim.val.df [,-c(1,2)], baim.val.df[,-c(1,2)]))
+one.one.line = data.frame(x = c(0,100),
+                          y = c(0,100))
+
+par(mfrow = c(1,2), mar = c(2.5,2.5,2,2), mgp = c(1.25,0.25, 0), tck = -0.01, cex = 0.8)
+plot(val.rawim.df$obs, val.rawim.df$sat, pch  = 16, col = t_col('blue'), 
+     cex = 0.9, xlim = yrange, ylim = yrange,
+     xlab = 'APHRODITE (mm/d)', ylab = c('IMERGL (mm/d)'))
+points(one.one.line$x, one.one.line$y, type = 'l',lwd = 0.5, lty = 2, col = 'grey50')
+mtext('(a) raw-IMERGL', cex = 0.7, font = 2, col = 'darkred', adj = 0)
+
+
+# panel 4
+plot(val.baim.df$obs, val.baim.df$sat, pch  = 16, col = t_col('blue'), 
+     cex = 0.9, xlim = yrange, ylim = yrange,
+     xlab = 'APHRODITE (mm/d)', ylab = c('IMERGL (mm/d)'))
+points(one.one.line$x, one.one.line$y, type = 'l', lwd = 0.5, lty = 2, col = 'grey50')
+mtext('(b) ba-IMERGL ', cex = 0.7, font = 2, col = 'darkred', adj = 0)
+
+```
+
+# 3 Acknowledgment 
+This demonstration thanks UCAR and NASA to make APHRODITE and GPM IMERG data freely accessible for our demonstration.
+
+
