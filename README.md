@@ -1,7 +1,7 @@
 # CIMERG
 This demonstration script is for ROK-US training #3 
 
-The tutorial1_data can be downloaded at https://drive.google.com/file/d/16n_HihOVQCF8TkVj1CztxrXv8cAo2BsR/view?usp=sharing
+The tutorial1_data can be downloaded at https://drive.google.com/drive/folders/1KEpsdsT6nQNHzbwoCBfCAWSy2I7sgZoJ?usp=sharing
 
 It is best if the folder structure is similar to the one below so the scripts run smoothly.
 
