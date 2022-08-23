@@ -3,7 +3,7 @@ This demonstration script is for ROK-US training #3
 
 The tutorial1_data can be downloaded at https://drive.google.com/drive/folders/1KEpsdsT6nQNHzbwoCBfCAWSy2I7sgZoJ?usp=sharing
 
-It is best if the folder structure is similar to the one below so the scripts run smoothly.
+It is the best if the folder structure is similar to the one below so the scripts could run smoothly.
 
  * /tutorial1_data
     + /aphro: 0.25 deg daily APHRODITE from 2001-2009 for the study domain
